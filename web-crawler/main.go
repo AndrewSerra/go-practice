@@ -5,60 +5,110 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 
 	"golang.org/x/net/html"
 )
 
-func TraverseNodeTree(*html.Node) error {
-	return nil
+type URLStructure struct {
+	scheme string `default:"https"`
+	host   string
+	path   string
 }
 
-func main() {
-	links := os.Args[1]
+type FetchGroup struct {
+	addr string
+	root *html.Node
+}
 
-	response, err := http.Get(links)
+func Fetch(addr string) (*FetchGroup, error) {
+	response, err := http.Get(addr)
 
 	if err != nil {
-		fmt.Printf("[ERROR] Cannot fetch url: %s, Message: %s\n", links, err)
-		os.Exit(1)
+		return nil, err
 	}
 
 	defer response.Body.Close()
 
-	rootNode, err := html.Parse(response.Body)
+	n, err := html.Parse(response.Body)
 
 	if err != nil {
-		fmt.Printf("[ERROR] Html cannot be parsed. Message: %s", err)
-		os.Exit(2)
+		return nil, err
 	}
 
-	var f func(*html.Node)
-	f = func(n *html.Node) {
-		if n.Type == html.ElementNode && n.Data == "a" {
+	return &FetchGroup{addr: addr, root: n}, nil
+}
 
-			for _, attr := range n.Attr {
-				if attr.Key == "href" {
-					// fmt.Printf("[DATA] Found: %s \n", attr.Val)
-					data, err := url.Parse(attr.Val)
+func TraverseNodeTree(fg *FetchGroup, c chan string, depth uint8) {
+	n := fg.root
+	// fmt.Printf("Depth!! %s\n", strconv.Itoa(int(depth)))
+	if n.Type == html.ElementNode && n.Data == "a" {
+		for _, attr := range n.Attr {
+			if attr.Key == "href" {
+				// fmt.Printf("[DATA] Found: %s \n", attr.Val)
+				data, err := url.Parse(attr.Val)
 
-					if err != nil {
-						fmt.Printf("[ERROR] URL cannot be parsed. Message: %s", err)
-						os.Exit(3)
-					}
-
-					if data.Host != "" {
-						fmt.Printf("[DATA] Found data domain: %s\n", data.Host)
-						fmt.Printf("------ Found data path: %s\n\n", data.Path)
-					} else {
-						fmt.Println("[DATA] No domain")
-						fmt.Printf("------ Found data path: %s\n\n", data.Path)
-					}
+				if err != nil {
+					// fmt.Printf("[ERROR] URL cannot be parsed. Message: %s", err)
+					continue
 				}
+
+				foundUrl := &URLStructure{
+					scheme: data.Scheme,
+					host:   data.Host,
+					path:   data.Path,
+				}
+				if data.Host != "" {
+					fmt.Printf("Depth: %s, %s://%s%s\n", strconv.Itoa(int(depth)), foundUrl.scheme, foundUrl.host, foundUrl.path)
+					c <- fmt.Sprintf("%s://%s%s", foundUrl.scheme, foundUrl.host, foundUrl.path)
+				}
+				// fmt.Printf("[CHECKPOINT] 6 -- %s -- %s -- %s \n", foundUrl.scheme, foundUrl.host, foundUrl.path)
+				// if data.Host != "" {
+				// 	fmt.Printf("%s://%s%s\n\n", foundUrl.scheme, foundUrl.host, foundUrl.path)
+				// 	c <- fmt.Sprintf("%s://%s%s", foundUrl.scheme, foundUrl.host, foundUrl.path)
+				// }
 			}
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
-		}
 	}
-	f(rootNode)
+
+	if depth == 0 {
+		return
+	}
+
+	for currChild := fg.root.FirstChild; currChild != nil; currChild = currChild.NextSibling {
+		go TraverseNodeTree(&FetchGroup{addr: fg.addr, root: currChild}, c, depth-1)
+	}
+
+	return
+}
+
+func main() {
+	visited := make(map[string]bool)
+	queue := make(chan string)
+	links := os.Args[1:]
+
+	go func() {
+		for _, link := range links {
+			queue <- link
+		}
+	}()
+
+	for newLink := range queue {
+		if _, ok := visited[newLink]; ok {
+			continue
+		} else {
+			visited[newLink] = true
+		}
+
+		fmt.Printf("[LOG] Working on a new link: %s\n", newLink)
+
+		rootNode, err := Fetch(newLink)
+
+		if err != nil {
+			fmt.Printf("[ERROR] Cannot fetch url: %s, Message: %s\n", newLink, err)
+			continue
+		}
+
+		go TraverseNodeTree(rootNode, queue, 3)
+	}
 }
